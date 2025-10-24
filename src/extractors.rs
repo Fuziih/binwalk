@@ -146,6 +146,7 @@ pub mod bmp;
 pub mod bzip2;
 pub mod cab;
 pub mod common;
+pub mod cpio;
 pub mod csman;
 pub mod dahua_zip;
 pub mod dmg;

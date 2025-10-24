@@ -168,7 +168,7 @@ pub fn patterns() -> Vec<signatures::common::Signature> {
             magic: signatures::cpio::cpio_magic(),
             parser: signatures::cpio::cpio_parser,
             description: signatures::cpio::DESCRIPTION.to_string(),
-            extractor: Some(extractors::sevenzip::sevenzip_extractor()),
+            extractor: Some(extractors::cpio::cpio_extractor()),
         },
         // iso9660 primary volume
         signatures::common::Signature {
