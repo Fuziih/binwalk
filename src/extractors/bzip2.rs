@@ -1,5 +1,6 @@
 use crate::extractors::common::{Chroot, ExtractionResult, Extractor, ExtractorType};
-use bzip2::{Decompress, Status};
+use bzip2::read::BzDecoder;
+use std::io::{Cursor, Read};
 
 /// Defines the internal extractor function for decompressing BZIP2 files
 ///
@@ -30,87 +31,88 @@ pub fn bzip2_extractor() -> Extractor {
     }
 }
 
+
 /// Internal extractor for decompressing BZIP2 data
 pub fn bzip2_decompressor(
     file_data: &[u8],
     offset: usize,
     output_directory: Option<&str>,
 ) -> ExtractionResult {
-    // Size of decompression buffer
-    const BLOCK_SIZE: usize = 900 * 1024;
+    // Size of streaming buffer
+    const READ_BUF_SIZE: usize = 64 * 1024;
     // Output file for decompressed data
     const OUTPUT_FILE_NAME: &str = "decompressed.bin";
 
-    let mut result = ExtractionResult {
-        ..Default::default()
-    };
+    let mut result = ExtractionResult::default();
 
-    let mut bytes_written: usize = 0;
-    let mut stream_offset: usize = 0;
-    let bzip2_data = &file_data[offset..];
-    let mut decompressed_buffer = [0; BLOCK_SIZE];
-    let mut decompressor = Decompress::new(false);
-    let available_data = bzip2_data.len();
+    // Nothing to do if offset is past EOF
+    if offset >= file_data.len() {
+        return result;
+    }
 
-    /*
-     * Loop through all compressed data and decompress it.
-     *
-     * This has a significant performance hit since 1) decompression takes time, and 2) data is
-     * decompressed once during signature validation and a second time during extraction (if extraction
-     * was requested).
-     *
-     * The advantage is that not only are we 100% sure that this data is valid BZIP2 data, but we
-     * can also determine the exact size of the BZIP2 data.
-     */
+    let mut total_consumed: usize = 0;
+    let mut any_decompressed = false;
+    let mut current_offset = offset;
 
-    while stream_offset < available_data {
-        let prev_offset = stream_offset;
+    // Loop to handle concatenated bzip2 members
+    loop {
+        if current_offset >= file_data.len() {
+            break;
+        }
 
-        match decompressor.decompress(&bzip2_data[stream_offset..], &mut decompressed_buffer) {
-            Err(_) => {
-                // Break on decompression error
-                break;
-            }
-            Ok(status) => {
-                match status {
-                    Status::RunOk |
-                    Status::FlushOk |
-                    Status::FinishOk |
-                    Status::MemNeeded => break,
-                    Status::Ok => {
-                        stream_offset = decompressor.total_in() as usize;
-                    }
-                    Status::StreamEnd => {
-                        result.success = true;
-                        result.size = Some(decompressor.total_in() as usize);
-                    }
-                }
+        let slice = &file_data[current_offset..];
+        let cursor = Cursor::new(slice);
+        let mut decoder = BzDecoder::new(cursor);
+        let mut read_buf = [0u8; READ_BUF_SIZE];
+        let mut any_output_this_member = false;
 
-                // Decompressed a block of data, if extraction was requested write the decompressed block to the output file
-                if output_directory.is_some() {
-                    let n: usize = (decompressor.total_out() as usize) - bytes_written;
-
-                    let chroot = Chroot::new(output_directory);
-                    if !chroot.append_to_file(OUTPUT_FILE_NAME, &decompressed_buffer[0..n]) {
-                        // If writing data to file fails, break
-                        break;
-                    }
-
-                    bytes_written += n;
-                }
-
-                // If everything has been processed successfully, we're done; break.
-                if result.success {
+        loop {
+            match decoder.read(&mut read_buf) {
+                Ok(0) => {
+                    // EOF for this member (or no output right now)
                     break;
                 }
+                Ok(n) => {
+                    any_output_this_member = true;
 
-                // prevent infinite loop when no progress happens
-                if stream_offset == prev_offset {
-                    break;
+                    // If extraction requested, append this decoded chunk
+                    if output_directory.is_some() {
+                        let chroot = Chroot::new(output_directory);
+                        if !chroot.append_to_file(OUTPUT_FILE_NAME, &read_buf[..n]) {
+                            // Writing failed; stop everything and return what we have so far
+                            result.success = any_decompressed;
+                            result.size = Some(total_consumed);
+                            return result;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Decompression error for this member -> stop processing
+                    result.success = any_decompressed;
+                    result.size = Some(total_consumed);
+                    return result;
                 }
             }
         }
+
+        let cursor = decoder.into_inner();
+        let consumed = cursor.position() as usize;
+
+        // If the decoder consumed zero bytes, stop to avoid infinite loop.
+        if consumed == 0 {
+            break;
+        }
+
+        current_offset += consumed;
+        total_consumed += consumed;
+
+        if any_output_this_member {
+            any_decompressed = true;
+        }
     }
+
+    result.success = any_decompressed;
+    result.size = if total_consumed > 0 { Some(total_consumed) } else { None };
 
     result
 }
