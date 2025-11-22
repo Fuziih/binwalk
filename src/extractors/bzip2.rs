@@ -1,4 +1,3 @@
-use crate::common::is_offset_safe;
 use crate::extractors::common::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use bzip2::{Decompress, Status};
 
@@ -52,7 +51,6 @@ pub fn bzip2_decompressor(
     let mut decompressed_buffer = [0; BLOCK_SIZE];
     let mut decompressor = Decompress::new(false);
     let available_data = bzip2_data.len();
-    let mut previous_offset = None;
 
     /*
      * Loop through all compressed data and decompress it.
@@ -64,10 +62,10 @@ pub fn bzip2_decompressor(
      * The advantage is that not only are we 100% sure that this data is valid BZIP2 data, but we
      * can also determine the exact size of the BZIP2 data.
      */
-    while is_offset_safe(available_data, stream_offset, previous_offset) {
-        previous_offset = Some(stream_offset);
 
-        // Decompress a block of data
+    while stream_offset < available_data {
+        let prev_offset = stream_offset;
+
         match decompressor.decompress(&bzip2_data[stream_offset..], &mut decompressed_buffer) {
             Err(_) => {
                 // Break on decompression error
@@ -75,9 +73,9 @@ pub fn bzip2_decompressor(
             }
             Ok(status) => {
                 match status {
-                    Status::RunOk => break,
-                    Status::FlushOk => break,
-                    Status::FinishOk => break,
+                    Status::RunOk |
+                    Status::FlushOk |
+                    Status::FinishOk |
                     Status::MemNeeded => break,
                     Status::Ok => {
                         stream_offset = decompressor.total_in() as usize;
@@ -103,6 +101,11 @@ pub fn bzip2_decompressor(
 
                 // If everything has been processed successfully, we're done; break.
                 if result.success {
+                    break;
+                }
+
+                // prevent infinite loop when no progress happens
+                if stream_offset == prev_offset {
                     break;
                 }
             }
